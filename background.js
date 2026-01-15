@@ -2,9 +2,83 @@
 // Track tabs where we've already inserted CSS to avoid duplicates
 const cssInjectedTabs = new Set();
 
+// Import modules for pinned tabs functionality
+importScripts('js/pinnedTabs.js');
+importScripts('js/autoPinSync.js');
+importScripts('js/datedLinks.js');
+importScripts('js/customTitles.js');
+
+// Function to update the badge based on items due today
+async function updateDueTodayBadge() {
+  try {
+    console.log('[Badge] updateDueTodayBadge called');
+
+    if (typeof self.datedLinksModule === 'undefined') {
+      console.warn('[Badge] datedLinksModule not available');
+      return;
+    }
+
+    const datedLinks = await self.datedLinksModule.load();
+    console.log('[Badge] Loaded dated links:', datedLinks.length, 'items');
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    console.log('[Badge] Today is:', today.toISOString());
+
+    // Count items due exactly today (not overdue)
+    const dueTodayItems = datedLinks.filter(item => {
+      const itemDate = new Date(item.date);
+      itemDate.setHours(0, 0, 0, 0);
+      const isToday = itemDate.getTime() === today.getTime();
+      console.log(`[Badge] Item "${item.title}" date: ${item.date}, isToday: ${isToday}`);
+      return isToday;
+    });
+
+    const dueTodayCount = dueTodayItems.length;
+    console.log('[Badge] Items due today:', dueTodayCount);
+
+    if (dueTodayCount > 0) {
+      // Show red badge with count
+      await chrome.action.setBadgeText({ text: String(dueTodayCount) });
+      await chrome.action.setBadgeBackgroundColor({ color: '#FF4444' });
+      console.log(`[Badge] Set badge to ${dueTodayCount} items due today`);
+    } else {
+      // Clear badge
+      await chrome.action.setBadgeText({ text: '' });
+      console.log('[Badge] Cleared badge - no items due today');
+    }
+  } catch (error) {
+    console.error('[Badge] Failed to update badge:', error);
+  }
+}
+
+// Initialize auto-pin sync on extension startup
+chrome.runtime.onStartup.addListener(() => {
+  if (self.autoPinSync) {
+    self.autoPinSync.init();
+  }
+  // Update badge on startup
+  updateDueTodayBadge();
+});
+
+// Also initialize on extension install
+chrome.runtime.onInstalled.addListener(() => {
+  if (self.autoPinSync) {
+    self.autoPinSync.init();
+  }
+  // Update badge on install
+  updateDueTodayBadge();
+});
+
 async function toggleCommandBar() {
+  console.log('toggleCommandBar called');
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab) return;
+  if (!tab) {
+    console.warn('No active tab found');
+    return;
+  }
+
+  console.log('Active tab:', tab.url, 'ID:', tab.id);
 
   // Skip restricted URLs
   if (tab.url?.startsWith('chrome://') || tab.url?.startsWith('edge://') || tab.url?.startsWith('chrome-extension://')) {
@@ -13,22 +87,31 @@ async function toggleCommandBar() {
   }
 
   try {
+    console.log('Starting injection process...');
+
     // Insert CSS once per tab lifecycle
     if (tab.id && !cssInjectedTabs.has(tab.id)) {
+      console.log('Injecting CSS...');
       await chrome.scripting.insertCSS({
         target: { tabId: tab.id },
-        files: ["style.css"],
+        files: ["shadow-overlay.css"]
       });
       cssInjectedTabs.add(tab.id);
+      console.log('CSS injected successfully');
     }
 
     // Inject content script (idempotent due to in-script guard)
+    console.log('Injecting content script...');
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       files: ["content.js"]
     });
+    console.log('Content script injected successfully');
+
     // toggle overlay
+    console.log('Sending TOGGLE message...');
     chrome.tabs.sendMessage(tab.id, { type: "TOGGLE" });
+    console.log('TOGGLE message sent');
   } catch (error) {
     console.error('Failed to inject content script or CSS:', error);
   }
@@ -36,6 +119,42 @@ async function toggleCommandBar() {
 
 async function openExtensionPopup() {
   try {
+    // Ensure there is a focused browser window; create one if none exist.
+    const ensureFocusedWindow = async () => {
+      const getLastFocused = () => new Promise((resolve) => {
+        chrome.windows.getLastFocused({ populate: false }, (win) => {
+          if (chrome.runtime.lastError) {
+            resolve(null);
+          } else {
+            resolve(win);
+          }
+        });
+      });
+
+      const focusWindow = (windowId) => new Promise((resolve) => {
+        chrome.windows.update(windowId, { focused: true }, () => resolve());
+      });
+
+      const createWindow = () => new Promise((resolve, reject) => {
+        chrome.windows.create({ url: 'chrome://newtab/', focused: true }, (win) => {
+          if (chrome.runtime.lastError || !win) {
+            reject(chrome.runtime.lastError || new Error('Failed to create window'));
+          } else {
+            resolve(win);
+          }
+        });
+      });
+
+      let win = await getLastFocused();
+      if (!win || win.state === 'minimized') {
+        win = await createWindow();
+      } else {
+        await focusWindow(win.id);
+      }
+      return win;
+    };
+
+    await ensureFocusedWindow();
     await chrome.action.openPopup();
   } catch (error) {
     console.error('Failed to open extension popup:', error);
@@ -58,7 +177,7 @@ chrome.action.onClicked.addListener(async (tab) => {
   await toggleCommandBar();
 });
 
-// Listen for tab events to update tab count
+// Listen for tab events to update tab count and badge
 chrome.tabs.onCreated.addListener(() => {
   // Send message to all tabs to update their tab count
   chrome.tabs.query({}, (tabs) => {
@@ -68,6 +187,8 @@ chrome.tabs.onCreated.addListener(() => {
       }
     });
   });
+  // Update badge when tabs are created
+  updateDueTodayBadge();
 });
 
 chrome.tabs.onRemoved.addListener(() => {
@@ -79,6 +200,8 @@ chrome.tabs.onRemoved.addListener(() => {
       }
     });
   });
+  // Update badge when tabs are removed
+  updateDueTodayBadge();
 });
 
 // Clear CSS tracking when tabs close
@@ -100,14 +223,35 @@ async function getBookmarkPath(node) {
 
 
 async function search(query) {
-  const [tabs, bookmarkTree, historyItems] = await Promise.all([
+  const [tabs, bookmarkTree, historyItems, customTitlesData] = await Promise.all([
     chrome.tabs.query({}),
     chrome.bookmarks.search({ query }),
-    chrome.history.search({ text: query, maxResults: 20 })
+    chrome.history.search({ text: query, maxResults: 20 }),
+    self.customTitlesModule ? self.customTitlesModule.load() : {}
   ]);
 
-  const tabMatches = tabs.filter(t => (t.title && t.title.toLowerCase().includes(query)) || (t.url && t.url.toLowerCase().includes(query)));
-  
+  // Helper function to get custom title for an item (from customTitles storage only)
+  const getCustomTitle = (url) => {
+    if (!url || !customTitlesData || Object.keys(customTitlesData).length === 0) return null;
+    const normalized = self.customTitlesModule ? self.customTitlesModule.normalizeUrl(url) : url;
+    return customTitlesData[normalized] || null;
+  };
+
+  // Helper function to check if item matches query (original title OR custom title)
+  const matchesQuery = (originalTitle, url, query) => {
+    const lowerQuery = query.toLowerCase();
+    // Check original title
+    if (originalTitle && originalTitle.toLowerCase().includes(lowerQuery)) return true;
+    // Check custom title
+    const customTitle = getCustomTitle(url);
+    if (customTitle && customTitle.toLowerCase().includes(lowerQuery)) return true;
+    // Check URL
+    if (url && url.toLowerCase().includes(lowerQuery)) return true;
+    return false;
+  };
+
+  const tabMatches = tabs.filter(t => matchesQuery(t.title, t.url, query));
+
   // Sort tabs by windowId first, then by index to maintain proper order
   tabMatches.sort((a, b) => {
     if (a.windowId !== b.windowId) {
@@ -115,11 +259,12 @@ async function search(query) {
     }
     return a.index - b.index;
   });
-  
+
   const tabResults = tabMatches.map(t => ({
     id: t.id,
     title: t.title,
     url: t.url,
+    customTitle: getCustomTitle(t.url),
     source: "tab",
     icon: t.favIconUrl && !t.favIconUrl.startsWith('chrome://') ? t.favIconUrl : '',
     type: 'tab',
@@ -131,13 +276,14 @@ async function search(query) {
   // Resolve bookmark folder paths concurrently
   const bookmarkResults = await Promise.all(bookmarkTree.map(async (b) => {
     const folderPath = await getBookmarkPath(b);
-    return { id: b.id, title: b.title, url: b.url, source: "bookmark", icon: '', folder: folderPath, type: 'bookmark', dateAdded: b.dateAdded || 0 };
+    return { id: b.id, title: b.title, url: b.url, customTitle: getCustomTitle(b.url), source: "bookmark", icon: '', folder: folderPath, type: 'bookmark', dateAdded: b.dateAdded || 0 };
   }));
 
   const historyResults = historyItems.map(h => ({
     id: h.id,
     title: h.title,
     url: h.url,
+    customTitle: getCustomTitle(h.url),
     source: "history",
     icon: '',
     lastVisitTime: h.lastVisitTime || 0,
@@ -145,6 +291,62 @@ async function search(query) {
   }));
 
   return [...tabResults, ...bookmarkResults, ...historyResults];
+}
+
+async function buildRecentFromTabs(tabs, activeId) {
+  const filtered = activeId ? tabs.filter((t) => t.id !== activeId) : tabs;
+
+  // Load custom titles from storage
+  const customTitlesData = self.customTitlesModule ? await self.customTitlesModule.load() : {};
+
+  // Helper function to get custom title for an item (from customTitles storage only)
+  const getCustomTitle = (url) => {
+    if (!url || !customTitlesData || Object.keys(customTitlesData).length === 0) return null;
+    const normalized = self.customTitlesModule ? self.customTitlesModule.normalizeUrl(url) : url;
+    return customTitlesData[normalized] || null;
+  };
+
+  return filtered.map((t) => ({
+    id: t.id,
+    title: t.title,
+    url: t.url,
+    customTitle: getCustomTitle(t.url),
+    source: "tab",
+    icon: t.favIconUrl && !t.favIconUrl.startsWith('chrome://') ? t.favIconUrl : '',
+    type: 'tab',
+    windowId: t.windowId,
+    index: t.index,
+    lastAccessed: t.lastAccessed || 0
+  }));
+}
+
+async function getPinnedTabsWithStatusFromTabs(openTabs) {
+  if (typeof pinnedTabsModule === 'undefined') {
+    return [];
+  }
+
+  const pinnedTabs = await pinnedTabsModule.load();
+  const normalizedOpenTabs = openTabs
+    .filter((t) => pinnedTabsModule.normalizeUrl(t.url))
+    .map((t) => ({
+      tab: t,
+      normalizedUrl: pinnedTabsModule.normalizeUrl(t.url)
+    }));
+
+  return pinnedTabs
+    .filter((pinnedTab) => pinnedTabsModule.normalizeUrl(pinnedTab.url))
+    .map((pinnedTab) => {
+      const pinnedNormalizedUrl = pinnedTabsModule.normalizeUrl(pinnedTab.url);
+      const match = normalizedOpenTabs.find((t) => t.normalizedUrl === pinnedNormalizedUrl);
+      const activeTab = match?.tab;
+
+      return {
+        ...pinnedTab,
+        isActive: Boolean(activeTab),
+        tabId: activeTab?.id || null,
+        favicon: activeTab?.favIconUrl || pinnedTab.favicon
+      };
+    });
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -155,26 +357,41 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse(filtered);
     });
     return true; // async
+  } else if (msg.type === "GET_INITIAL_STATE") {
+    (async () => {
+      try {
+        const activeId = sender.tab?.id;
+        const tabs = await chrome.tabs.query({});
+        const pinnedTabsWithStatus = await getPinnedTabsWithStatusFromTabs(tabs);
+        const recent = await buildRecentFromTabs(tabs, activeId);
+        sendResponse({
+          success: true,
+          recent: recent,
+          tabCount: tabs.length,
+          pinnedTabs: pinnedTabsWithStatus
+        });
+      } catch (error) {
+        console.error('Failed to get initial state:', error);
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true; // async
   } else if (msg.type === "RECENT") {
-    chrome.tabs.query({}, (allTabs) => {
-      const activeId = sender.tab?.id;
-      const filtered = activeId ? allTabs.filter(t => t.id !== activeId) : allTabs;
-      
-      // Don't pre-sort here - let content script sort by lastAccessed
-      
-      const recent = filtered.map(t => ({ 
-        id: t.id, 
-        title: t.title, 
-        url: t.url, 
-        source: "tab", 
-        icon: t.favIconUrl && !t.favIconUrl.startsWith('chrome://') ? t.favIconUrl : '', 
-        type: 'tab',
-        windowId: t.windowId,
-        index: t.index,
-        lastAccessed: t.lastAccessed || 0
-      }));
-      sendResponse(recent);
-    });
+    (async () => {
+      try {
+        const allTabs = await chrome.tabs.query({});
+        const activeId = sender.tab?.id;
+        const filtered = activeId ? allTabs.filter(t => t.id !== activeId) : allTabs;
+
+        // Don't pre-sort here - let content script sort by lastAccessed
+
+        const recent = await buildRecentFromTabs(filtered, null);
+        sendResponse(recent);
+      } catch (error) {
+        console.error('Failed to get recent tabs:', error);
+        sendResponse([]);
+      }
+    })();
     return true;
   } else if (msg.type === "DELETE") {
     const { item } = msg;
@@ -243,5 +460,94 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
     });
     return true; // async
+  } else if (msg.type === "GET_PINNED_TABS") {
+    (async () => {
+      try {
+        const tabs = await chrome.tabs.query({});
+        const pinnedTabsWithStatus = await getPinnedTabsWithStatusFromTabs(tabs);
+        sendResponse({ success: true, pinnedTabs: pinnedTabsWithStatus });
+      } catch (error) {
+        console.error('Failed to get pinned tabs:', error);
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true; // async
+  } else if (msg.type === "ADD_PINNED_TAB") {
+    const { tabData } = msg;
+    // Use centralized storage for adding pinned tabs
+    if (typeof pinnedTabsModule !== 'undefined') {
+      (async () => {
+        try {
+          const success = await pinnedTabsModule.addPinnedTab(tabData);
+          if (success) {
+            sendResponse({ success: true });
+          } else {
+            sendResponse({ success: false, error: 'Failed to add pinned tab (may already exist or limit reached)' });
+          }
+        } catch (error) {
+          console.error('Failed to add pinned tab:', error);
+          sendResponse({ success: false, error: error.message });
+        }
+      })();
+    } else {
+      sendResponse({ success: false, error: 'Pinned tabs module not available' });
+    }
+    return true; // async
+  } else if (msg.type === "REMOVE_PINNED_TAB") {
+    const { url } = msg;
+    // Use centralized storage for removing pinned tabs
+    if (typeof pinnedTabsModule !== 'undefined') {
+      (async () => {
+        try {
+          const success = await pinnedTabsModule.removePinnedTab(url);
+          if (success) {
+            sendResponse({ success: true });
+          } else {
+            sendResponse({ success: false, error: 'Pinned tab not found' });
+          }
+        } catch (error) {
+          console.error('Failed to remove pinned tab:', error);
+          sendResponse({ success: false, error: error.message });
+        }
+      })();
+    } else {
+      sendResponse({ success: false, error: 'Pinned tabs module not available' });
+    }
+    return true; // async
+  } else if (msg.type === "CLOSE_PINNED_TAB") {
+    const { tabId } = msg;
+    chrome.tabs.remove(tabId, () => {
+      sendResponse({ success: true });
+    });
+    return true; // async
+  } else if (msg.type === "OPEN_PINNED_TAB") {
+    const { url } = msg;
+    chrome.tabs.create({ url, active: true, pinned: true }, (tab) => {
+      if (chrome.runtime.lastError) {
+        sendResponse({ success: false, error: chrome.runtime.lastError.message });
+      } else {
+        sendResponse({ success: true, tabId: tab.id });
+      }
+    });
+    return true; // async
+  } else if (msg.type === "ACTIVATE_TAB") {
+    const { tabId } = msg;
+    chrome.tabs.update(tabId, { active: true }, (tab) => {
+      if (chrome.runtime.lastError || !tab) {
+        sendResponse({ success: false });
+        return;
+      }
+      chrome.windows.update(tab.windowId, { focused: true });
+      sendResponse({ success: true });
+    });
+    return true; // async
+  }
+});
+
+// Listen for storage changes to update badge when dated links are modified
+chrome.storage.onChanged.addListener((changes, namespace) => {
+  if (namespace === 'local' && changes.datedLinks) {
+    console.log('[Badge] Dated links changed, updating badge');
+    updateDueTodayBadge();
   }
 });

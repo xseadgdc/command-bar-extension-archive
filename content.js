@@ -1,7 +1,26 @@
 // content.js
 (() => {
-  if (window.__cmdBarInjected) return;
+  const TRACE = Boolean(window.__CMD_BAR_TRACE);
+  const now = () => (typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now());
+  const trace = (...args) => {
+    if (!TRACE) return;
+    console.log('[CmdBarTrace]', ...args);
+  };
+
+  const scriptStart = now();
+  console.log('Content script loading...');
+  if (window.__cmdBarInjected) {
+    console.log('Content script already injected, skipping');
+    return;
+  }
   window.__cmdBarInjected = true;
+  console.log('Content script injected successfully');
+
+// Detect when running inside the extension popup so we can render the command bar there.
+const extensionOrigin = chrome?.runtime?.id ? `chrome-extension://${chrome.runtime.id}` : '';
+const isExtensionPage = window.location?.origin === extensionOrigin;
+const isPopupContext = Boolean(window.__CMD_BAR_POPUP) || (isExtensionPage && window.location?.pathname?.endsWith('/popup.html'));
+trace('loaded', { isPopupContext, isExtensionPage, href: window.location?.href, t: now() - scriptStart });
 
 // Constants
 const CONSTANTS = {
@@ -25,12 +44,12 @@ const messageService = {
 
 // UI State Manager for better organization
 const uiState = {
-  shadowHost: null,
-  shadowRoot: null,
   overlay: null,
   input: null,
   listEl: null,
   statusBar: null,
+  pinnedTabsEl: null,
+  pinnedTabs: [],
   items: [],
   selectedIdx: -1,
   idleTimer: null,
@@ -58,12 +77,28 @@ const uiState = {
   },
   
   setItems(newItems) {
-    this.items = this.sortItemsByLastVisited(newItems || []);
+        this.items = this.sortItems(newItems || []);
     this.selectedIdx = -1;
   },
   
-  sortItemsByLastVisited(items) {
+    sortItems(items) {
+    const typeOrder = {
+      'tab': 1,
+      'bookmark': 2,
+      'history': 3
+    };
+
     return items.sort((a, b) => {
+      const aType = a.type || a.source;
+      const bType = b.type || b.source;
+      
+      const aOrder = typeOrder[aType] || 4;
+      const bOrder = typeOrder[bType] || 4;
+
+      if (aOrder !== bOrder) {
+        return aOrder - bOrder;
+      }
+
       // Get last visited time for each item
       const getLastVisited = (item) => {
         if (item.lastAccessed) return item.lastAccessed; // tabs
@@ -85,8 +120,10 @@ const uiState = {
 // Legacy global variables for backward compatibility
 let overlay, input, listEl, statusBar, items, selectedIdx, idleTimer;
 let deleteConfirm, lastConfirmIdx, confirmTimer;
+let stylesInjected = false;
 
 function createOverlay() {
+    const tCreateStart = now();
     // Update state references
     overlay = uiState.overlay;
     input = uiState.input;
@@ -99,36 +136,40 @@ function createOverlay() {
     confirmTimer = uiState.confirmTimer;
     idleTimer = uiState.idleTimer;
 
-    // Create shadow host
-    uiState.shadowHost = document.createElement('div');
-    uiState.shadowHost.id = 'prd-stv-cmd-bar-host';
-
-    // Attach shadow root with open mode for debugging, closed mode for production
-    uiState.shadowRoot = uiState.shadowHost.attachShadow({ mode: 'open' });
-
-    // Load CSS into shadow DOM
-    const styleElement = document.createElement('style');
-    fetch(chrome.runtime.getURL('shadow-overlay.css'))
-      .then(response => response.text())
-      .then(css => {
-        styleElement.textContent = css;
-        uiState.shadowRoot.appendChild(styleElement);
-      })
-      .catch(err => {
-        console.error('Failed to load shadow-overlay.css:', err);
-        // Fallback: use inline styles if CSS file fails to load
-        styleElement.textContent = `
-          :host { display: block; }
-          #prd-stv-cmd-bar-overlay {
-            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
-            backdrop-filter: blur(8px); background: rgba(0, 0, 0, 0.3);
-            display: flex; align-items: center; justify-content: center;
-            z-index: 2147483647;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-          }
-        `;
-        uiState.shadowRoot.appendChild(styleElement);
-      });
+    // Load CSS into the document once
+    if (!stylesInjected) {
+      if (isPopupContext) {
+        // popup.html links shadow-overlay.css directly for faster paint
+        stylesInjected = true;
+      } else {
+        const styleElement = document.createElement('style');
+        styleElement.id = 'prd-stv-cmd-bar-styles';
+        const tCssStart = now();
+        fetch(chrome.runtime.getURL('shadow-overlay.css'))
+          .then(response => response.text())
+          .then(css => {
+            styleElement.textContent = css;
+            document.head.appendChild(styleElement);
+            stylesInjected = true;
+            trace('css_loaded', { ms: now() - tCssStart });
+          })
+          .catch(err => {
+            console.error('Failed to load shadow-overlay.css:', err);
+            // Fallback: use inline styles if CSS file fails to load
+            styleElement.textContent = `
+              #prd-stv-cmd-bar-overlay {
+                position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+                backdrop-filter: blur(8px); background: rgba(0, 0, 0, 0.3);
+                display: flex; align-items: center; justify-content: center;
+                z-index: 2147483647;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+              }
+            `;
+            document.head.appendChild(styleElement);
+            stylesInjected = true;
+          });
+      }
+    }
 
     // Create overlay inside shadow DOM
     uiState.overlay = document.createElement('div');
@@ -163,12 +204,12 @@ function createOverlay() {
     tabCounterContainer.appendChild(document.createTextNode(' tabs'));
 
     // Create status message element
-    const statusMessage = document.createElement('span');
-    statusMessage.id = 'prd-stv-status-message';
-    statusMessage.textContent = CONSTANTS.DEFAULT_STATUS_MSG;
+    const statusMessageEl = document.createElement('span');
+    statusMessageEl.id = 'prd-stv-status-message';
+    statusMessageEl.textContent = CONSTANTS.DEFAULT_STATUS_MSG;
 
     uiState.statusBar.appendChild(tabCounterContainer);
-    uiState.statusBar.appendChild(statusMessage);
+    uiState.statusBar.appendChild(statusMessageEl);
     uiState.statusBar.style.display = 'flex';
     uiState.statusBar.style.alignItems = 'center';
 
@@ -178,6 +219,13 @@ function createOverlay() {
     listEl = uiState.listEl;
     statusBar = uiState.statusBar;
 
+    // Create pinned tabs container (same as sidepanel)
+    uiState.pinnedTabsEl = document.createElement('div');
+    uiState.pinnedTabsEl.id = 'pinned-tabs-container';
+    uiState.pinnedTabsEl.className = 'prd-stv-pinned-tabs';
+    uiState.pinnedTabsEl.style.cssText = 'display:none;';
+
+    container.appendChild(uiState.pinnedTabsEl);
     container.appendChild(uiState.input);
     container.appendChild(uiState.listEl);
     container.appendChild(uiState.statusBar);
@@ -192,11 +240,9 @@ function createOverlay() {
     // Prevent clicks inside the container from bubbling to overlay handler
     container.addEventListener('mousedown', (ev) => ev.stopPropagation());
 
-    // Append overlay to shadow root instead of document body
-    uiState.shadowRoot.appendChild(uiState.overlay);
-
-    // Append shadow host to document body
-    document.body.appendChild(uiState.shadowHost);
+    // Append overlay directly to document body
+    document.body.appendChild(uiState.overlay);
+    trace('overlay_appended', { ms: now() - tCreateStart });
 
     // listeners
     uiState.input.addEventListener('keydown', onKeyDown);
@@ -205,27 +251,55 @@ function createOverlay() {
     uiState.input.addEventListener('input', onInput);
     uiState.input.focus();
 
-    // initial recent
-    messageService.recent((res) => {
-      uiState.setItems(res);
-      items = uiState.items;
-      selectedIdx = uiState.selectedIdx;
-      renderList();
-    });
+    // Initial data (tabs + pinned tabs + count) in one roundtrip to reduce cold-start overhead.
+    const statusMessage = document.getElementById('prd-stv-status-message');
+    if (statusMessage) statusMessage.textContent = 'Loading…';
 
-    // Get initial tab count
-    updateTabCount();
+    const tInitStart = now();
+    chrome.runtime.sendMessage({ type: 'GET_INITIAL_STATE' }, (response) => {
+      const err = chrome.runtime.lastError?.message;
+      trace('initial_state', { ms: now() - tInitStart, ok: response?.success, err });
+
+      if (err || !response || response.success === false) {
+        // Fallback to legacy init paths if the background doesn't support GET_INITIAL_STATE.
+        loadPinnedTabs();
+        messageService.recent((res) => {
+          uiState.setItems(res);
+          items = uiState.items;
+          selectedIdx = uiState.selectedIdx;
+          renderList();
+          if (statusMessage) statusMessage.textContent = CONSTANTS.DEFAULT_STATUS_MSG;
+        });
+        updateTabCount();
+        return;
+      }
+
+      if (Array.isArray(response.pinnedTabs)) {
+        renderPinnedTabs(response.pinnedTabs);
+      }
+      if (typeof response.tabCount === 'number') {
+        applyTabCount(response.tabCount);
+      }
+      if (Array.isArray(response.recent)) {
+        uiState.setItems(response.recent);
+        items = uiState.items;
+        selectedIdx = uiState.selectedIdx;
+        renderList();
+      }
+
+      if (statusMessage) statusMessage.textContent = CONSTANTS.DEFAULT_STATUS_MSG;
+    });
   }
 
   function destroyOverlay() {
     cancelAutoOpen();
     document.removeEventListener('keydown', onGlobalKeyDown);
     document.removeEventListener('keyup', onGlobalKeyUp);
-    uiState.shadowHost?.remove();
-    uiState.shadowHost = null;
-    uiState.shadowRoot = null;
     uiState.overlay = null;
     overlay = null;
+    if (isPopupContext) {
+      window.close();
+    }
   }
 
 function toggleOverlay() {
@@ -322,8 +396,12 @@ function onGlobalKeyDown(e) {
       renderList();
       cancelAutoOpen();
 
-      // Blur input so backspace won't edit text
-      if (document.activeElement === input) input.blur();
+      // Blur input so backspace won't edit text - use requestAnimationFrame to ensure proper timing
+      requestAnimationFrame(() => {
+        if (document.activeElement === input) {
+          input.blur();
+        }
+      });
       return true;
     },
     
@@ -342,7 +420,11 @@ function onGlobalKeyDown(e) {
           selectedIdx = items.length - 1;
           renderList();
           cancelAutoOpen();
-          input.blur();
+          requestAnimationFrame(() => {
+            if (document.activeElement === input) {
+              input.blur();
+            }
+          });
         }
         return true;
       }
@@ -355,11 +437,10 @@ function onGlobalKeyDown(e) {
         return false;
       }
 
-      // Check shadow root's active element since we're using Shadow DOM
-      const shadowActiveElement = uiState.shadowRoot?.activeElement;
+      const activeEl = document.activeElement;
 
       // Allow normal backspace behavior when input is focused and has text
-      if (shadowActiveElement === input && input.value !== '') {
+      if (activeEl === input && input.value !== '') {
         return false; // Don't handle - allow default backspace behavior
       }
 
@@ -417,9 +498,14 @@ function onGlobalKeyDown(e) {
     }
   }
   
-  function removeItemFromList() {
-    items.splice(selectedIdx, 1);
-    if (selectedIdx >= items.length) selectedIdx = items.length - 1;
+  function removeItemFromList(index = selectedIdx) {
+    if (index < 0 || index >= items.length) return;
+    items.splice(index, 1);
+    if (selectedIdx >= items.length) {
+      selectedIdx = items.length - 1;
+    } else if (selectedIdx > index) {
+      selectedIdx = Math.max(0, selectedIdx - 1);
+    }
     renderList();
     // Update tab count after removing an item
     updateTabCount();
@@ -497,7 +583,7 @@ function hideDeleteConfirm() {
       uiState.confirmTimer = null;
       confirmTimer = null;
     }
-    const statusMessage = uiState.shadowRoot?.getElementById('prd-stv-status-message');
+    const statusMessage = document.getElementById('prd-stv-status-message');
     if (statusMessage) {
       statusMessage.textContent = CONSTANTS.DEFAULT_STATUS_MSG;
       statusMessage.classList.remove('confirm');
@@ -518,7 +604,7 @@ function removeProgressBars() {
   }
 
 function showDeleteConfirm() {
-    const statusMessage = uiState.shadowRoot?.getElementById('prd-stv-status-message');
+    const statusMessage = document.getElementById('prd-stv-status-message');
     if (!statusMessage) return;
 
     statusMessage.textContent = 'Press backspace again to confirm';
@@ -549,21 +635,26 @@ function showDeleteConfirm() {
 
     const iconHtml = getIconHtml(item);
     
-    // Add 3-dots menu for bookmarks and tabs
+    // Add controls (check + 3-dots). In popup context, tabs get a close button on the left.
     const isBookmark = item.type === 'bookmark';
     const isTab = item.type === 'tab';
+    const showCloseBtn = isPopupContext && isTab;
     const controlsHtml = (isBookmark || isTab) ? `
       <div class="prd-stv-item-controls" style="opacity:0;transition:opacity 0.2s ease;margin-left:auto;padding-left:8px;">
+        ${showCloseBtn ? `<button class="prd-stv-close-btn" title="Close tab" data-close-tab-id="${item.id}">✓</button>` : ''}
         <button class="prd-stv-menu-btn" title="More options" ${isBookmark ? `data-bookmark-id="${item.id}"` : `data-tab-id="${item.id}"`}
           style="background:transparent;border:none;color:#9b9b9b;font-size:16px;cursor:pointer;padding:4px;border-radius:15px;">⋯</button>
       </div>
     ` : '';
     
+    // Use custom title if available, otherwise use original title
+    const displayTitle = item.customTitle || item.title || item.url;
+
     div.innerHTML = `
       <div style="display:flex;align-items:center;width:100%;">
         ${iconHtml}
         <div style="display:flex;flex-direction:row; gap: 5px;flex:1;min-width:0;">
-          <span style="text-overflow: ellipsis;white-space: nowrap;overflow: hidden;">${highlightMatches(item.title || item.url, input?.value.trim())}</span>
+          <span style="text-overflow: ellipsis;white-space: nowrap;overflow: hidden;">${highlightMatches(displayTitle, input?.value.trim())}</span>
           <span class="prd-stv-url" style="text-overflow: ellipsis;white-space: nowrap;overflow: hidden;">${getSubtitle(item)}</span>
         </div>
         ${controlsHtml}
@@ -580,7 +671,13 @@ function showDeleteConfirm() {
     
     // Add click handler
     div.addEventListener('click', (e) => {
-      if (e.target.classList.contains('prd-stv-menu-btn')) {
+      if (e.target.classList.contains('prd-stv-close-btn')) {
+        e.stopPropagation();
+        if (item.type === 'tab') {
+          messageService.delete(item);
+          removeItemFromList(index);
+        }
+      } else if (e.target.classList.contains('prd-stv-menu-btn')) {
         e.stopPropagation();
         if (item.type === 'bookmark') {
           showBookmarkContextMenu(e, item, div);
@@ -663,16 +760,12 @@ function getIconHtml(it) {
   }
 
 function showToast(message, duration = 2000) {
-    const existing = uiState.shadowRoot?.getElementById('prd-stv-toast');
+    const existing = document.getElementById('prd-stv-toast');
     existing?.remove();
     const div = document.createElement('div');
     div.id = 'prd-stv-toast';
     div.textContent = message;
-    if (uiState.shadowRoot) {
-      uiState.shadowRoot.appendChild(div);
-    } else {
-      document.body.appendChild(div);
-    }
+    document.body.appendChild(div);
     setTimeout(() => div.remove(), duration);
   }
 
@@ -739,28 +832,30 @@ function showToast(message, duration = 2000) {
     return str.slice(0, part) + '...' + str.slice(str.length - part);
   }
 
+  function applyTabCount(count) {
+    const tabCounter = document.getElementById('prd-stv-tab-counter');
+    if (!tabCounter || typeof count !== 'number') return;
+
+    const oldCount = parseInt(tabCounter.textContent) || 0;
+    const newCount = count;
+
+    if (oldCount !== newCount) {
+      tabCounter.textContent = newCount;
+      tabCounter.classList.remove('prd-stv-tab-count-update');
+      void tabCounter.offsetWidth; // reflow to restart animation
+      tabCounter.classList.add('prd-stv-tab-count-update');
+    }
+  }
+
   // Update the tab counter in the status bar
   function updateTabCount() {
-    // Request tab count from background script
     chrome.runtime.sendMessage({ type: "GET_TAB_COUNT" }, (response) => {
       if (chrome.runtime.lastError) {
         console.error('Error getting tab count:', chrome.runtime.lastError);
         return;
       }
-
-      const tabCounter = uiState.shadowRoot?.getElementById('prd-stv-tab-counter');
-      if (tabCounter && response && response.count !== undefined) {
-        const oldCount = parseInt(tabCounter.textContent) || 0;
-        const newCount = response.count;
-
-        // Update the counter with animation if the count changed
-        if (oldCount !== newCount) {
-          tabCounter.textContent = newCount;
-          tabCounter.classList.remove('prd-stv-tab-count-update');
-          // Trigger reflow to restart animation
-          void tabCounter.offsetWidth;
-          tabCounter.classList.add('prd-stv-tab-count-update');
-        }
+      if (response && response.count !== undefined) {
+        applyTabCount(response.count);
       }
     });
   }
@@ -805,11 +900,7 @@ function showToast(message, duration = 2000) {
         background: #353535 !important;
       }
     `;
-    if (uiState.shadowRoot) {
-      uiState.shadowRoot.appendChild(style);
-    } else {
-      document.head.appendChild(style);
-    }
+    document.head.appendChild(style);
 
     // Position the menu relative to the clicked button
     const buttonRect = event.target.getBoundingClientRect();
@@ -817,11 +908,7 @@ function showToast(message, duration = 2000) {
     contextMenu.style.top = `${buttonRect.bottom + 4}px`; // Below the button
 
     // Add to shadow root if available
-    if (uiState.shadowRoot) {
-      uiState.shadowRoot.appendChild(contextMenu);
-    } else {
-      document.body.appendChild(contextMenu);
-    }
+    document.body.appendChild(contextMenu);
 
     // Handle menu item clicks
     contextMenu.addEventListener('click', (e) => {
@@ -841,7 +928,7 @@ function showToast(message, duration = 2000) {
   }
 
   function closeBookmarkContextMenu() {
-    const existingMenu = uiState.shadowRoot?.getElementById('prd-stv-bookmark-context-menu') || document.getElementById('prd-stv-bookmark-context-menu');
+    const existingMenu = document.getElementById('prd-stv-bookmark-context-menu');
     if (existingMenu) {
       existingMenu.remove();
     }
@@ -927,6 +1014,9 @@ function showToast(message, duration = 2000) {
     `;
 
     contextMenu.innerHTML = `
+      <div class="context-item" data-action="pin" style="padding:10px 14px;cursor:pointer;color:#f5f5f5;font-size:14px;transition:background-color 0.15s ease;border-bottom:1px solid #3a3a3a;">
+        <span>Pin Tab</span>
+      </div>
       <div class="context-item" data-action="move-to-folder" style="padding:10px 14px;cursor:pointer;color:#f5f5f5;font-size:14px;transition:background-color 0.15s ease;border-bottom:1px solid #3a3a3a;">
         <span>Move to...</span>
       </div>
@@ -946,11 +1036,7 @@ function showToast(message, duration = 2000) {
         background: #353535 !important;
       }
     `;
-    if (uiState.shadowRoot) {
-      uiState.shadowRoot.appendChild(style);
-    } else {
-      document.head.appendChild(style);
-    }
+    document.head.appendChild(style);
 
     // Position the menu relative to the clicked button
     const buttonRect = event.target.getBoundingClientRect();
@@ -958,16 +1044,14 @@ function showToast(message, duration = 2000) {
     contextMenu.style.top = `${buttonRect.bottom + 4}px`; // Below the button
 
     // Add to shadow root if available
-    if (uiState.shadowRoot) {
-      uiState.shadowRoot.appendChild(contextMenu);
-    } else {
-      document.body.appendChild(contextMenu);
-    }
+    document.body.appendChild(contextMenu);
 
     // Handle menu item clicks
     contextMenu.addEventListener('click', async (e) => {
       const action = e.target.closest('.context-item')?.dataset.action;
-      if (action === 'move-to-folder') {
+      if (action === 'pin') {
+        await handlePinTab(tab);
+      } else if (action === 'move-to-folder') {
         // Create a fake bookmark object to reuse the existing move dialog
         const fakeBookmark = {
           id: `tab_${tab.id}`,
@@ -990,7 +1074,7 @@ function showToast(message, duration = 2000) {
   }
 
   function closeTabContextMenu() {
-    const existingMenu = uiState.shadowRoot?.getElementById('prd-stv-tab-context-menu') || document.getElementById('prd-stv-tab-context-menu');
+    const existingMenu = document.getElementById('prd-stv-tab-context-menu');
     if (existingMenu) {
       existingMenu.remove();
     }
@@ -1038,11 +1122,152 @@ function showToast(message, duration = 2000) {
     }
   }
 
+  async function handlePinTab(tab) {
+    try {
+      const tabData = {
+        url: tab.url,
+        title: tab.title || 'Untitled',
+        favicon: tab.icon || tab.favIconUrl || ''
+      };
+      
+      const response = await chrome.runtime.sendMessage({ 
+        type: 'ADD_PINNED_TAB', 
+        tabData 
+      });
+      
+      if (response && response.success) {
+        showToast('Tab pinned');
+        loadPinnedTabs();
+      } else {
+        throw new Error(response?.error || 'Failed to pin tab');
+      }
+    } catch (error) {
+      console.error('Failed to pin tab:', error);
+      showToast(error.message || 'Failed to pin tab');
+    }
+  }
+
+  // Pinned Tabs Functions
+  async function loadPinnedTabs() {
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'GET_PINNED_TABS' });
+      if (response && response.pinnedTabs) {
+        renderPinnedTabs(response.pinnedTabs);
+      }
+    } catch (error) {
+      console.error('Failed to load pinned tabs:', error);
+    }
+  }
+
+  function renderPinnedTabs(pinnedTabs) {
+    if (!uiState.pinnedTabsEl) return;
+
+    if (!pinnedTabs || pinnedTabs.length === 0) {
+      uiState.pinnedTabsEl.style.display = 'none';
+      return;
+    }
+
+    // Use same display style as sidepanel
+    uiState.pinnedTabsEl.style.display = 'grid';
+    uiState.pinnedTabsEl.innerHTML = '';
+
+    pinnedTabs.forEach(pinnedTab => {
+      // Create icon element with same class as sidepanel
+      const tabIcon = document.createElement('div');
+      tabIcon.className = 'pinned-tab-icon';
+      tabIcon.dataset.url = pinnedTab.url;
+      tabIcon.title = pinnedTab.title;
+
+      // Add active/inactive state classes (same as sidepanel)
+      if (pinnedTab.isActive) {
+        tabIcon.classList.add('pinned-tab-active');
+      } else {
+        tabIcon.classList.add('pinned-tab-inactive');
+      }
+
+      // Create favicon with same class as sidepanel
+      const favicon = document.createElement('img');
+      favicon.className = 'pinned-tab-favicon';
+      favicon.src = pinnedTab.favicon || CONSTANTS.FALLBACK_ICON;
+      favicon.alt = pinnedTab.title;
+      favicon.onerror = () => {
+        favicon.src = CONSTANTS.FALLBACK_ICON;
+      };
+      tabIcon.appendChild(favicon);
+
+      // Create action button with same class as sidepanel
+      const btn = document.createElement('button');
+      btn.className = 'pinned-tab-action';
+      btn.innerHTML = pinnedTab.isActive ? '−' : '×';
+      btn.title = pinnedTab.isActive ? 'Close tab' : 'Remove from pinned';
+
+      btn.onclick = async (e) => {
+        e.stopPropagation();
+        try {
+          if (pinnedTab.isActive && pinnedTab.tabId) {
+            // Close active tab
+            await chrome.runtime.sendMessage({ 
+              type: 'CLOSE_PINNED_TAB', 
+              tabId: pinnedTab.tabId 
+            });
+          } else {
+            // Remove pinned tab
+            await chrome.runtime.sendMessage({ 
+              type: 'REMOVE_PINNED_TAB', 
+              url: pinnedTab.url 
+            });
+          }
+          // Reload pinned tabs
+          loadPinnedTabs();
+        } catch (error) {
+          console.error('Failed to handle pinned tab action:', error);
+        }
+      };
+      tabIcon.appendChild(btn);
+
+      // Click on icon to open/activate (not on button)
+      tabIcon.onclick = async (e) => {
+        if (e.target === btn) return; // Don't trigger when clicking button
+        
+        try {
+          if (pinnedTab.isActive && pinnedTab.tabId) {
+            // Activate existing tab
+            await chrome.runtime.sendMessage({ 
+              type: 'ACTIVATE_TAB', 
+              tabId: pinnedTab.tabId 
+            });
+            destroyOverlay();
+          } else {
+            // Open new tab
+            await chrome.runtime.sendMessage({ 
+              type: 'OPEN_PINNED_TAB', 
+              url: pinnedTab.url 
+            });
+            destroyOverlay();
+          }
+        } catch (error) {
+          console.error('Failed to open pinned tab:', error);
+        }
+      };
+
+      uiState.pinnedTabsEl.appendChild(tabIcon);
+    });
+  }
+
   chrome.runtime.onMessage.addListener((msg) => {
+    console.log('Content script received message:', msg.type);
     if (msg.type === 'TOGGLE') {
+      console.log('Toggling overlay...');
       toggleOverlay();
     } else if (msg.type === 'TAB_COUNT_CHANGED') {
       updateTabCount();
+    } else if (msg.type === 'PINNED_TABS_UPDATED') {
+      loadPinnedTabs();
     }
   });
+
+  // In the extension popup, render the command bar immediately instead of using the side panel shell.
+  if (isPopupContext) {
+    createOverlay();
+  }
 })();

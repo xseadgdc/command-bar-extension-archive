@@ -9,7 +9,9 @@ const STORAGE_KEYS = {
   EXPANDED_FOLDERS: 'expandedFolders',
   BOOKMARK_TAB_LINKS: 'bookmarkTabLinks',
   TAB_SORT_MODE: 'tabSortMode',
-  BOOKMARK_VIEW_MODE: 'bookmarkViewMode'
+  BOOKMARK_VIEW_MODE: 'bookmarkViewMode',
+  SEARCH_QUERY: 'searchQuery',
+  DATED_LINKS: 'datedLinks'
 };
 
 const ITEM_TYPES = {

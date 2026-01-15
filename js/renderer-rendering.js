@@ -1,12 +1,72 @@
 // Core rendering module for DOM generation and updates
 
+// Render lock to prevent race conditions from concurrent render calls
+let isRendering = false;
+let pendingRender = null;
+
 const rendererRendering = {
   // Main render function
   render: async (state, elements) => {
-    await rendererRendering.renderCombined(state, elements);
-    if (window.dragDrop && typeof window.dragDrop.refreshSortables === 'function') {
-      window.dragDrop.refreshSortables(state, elements);
+    // If already rendering, queue this render request and exit
+    if (isRendering) {
+      pendingRender = { state, elements };
+      return;
     }
+
+    isRendering = true;
+
+    try {
+      // Preserve scroll position before re-rendering (elements.combined is the scrollable container)
+      const scrollTop = elements.combined ? elements.combined.scrollTop : 0;
+
+      await rendererRendering.renderCombined(state, elements);
+      if (window.dragDrop && typeof window.dragDrop.refreshSortables === 'function') {
+        window.dragDrop.refreshSortables(state, elements);
+      }
+
+      // Restore scroll position after re-rendering
+      if (elements.combined && scrollTop > 0) {
+        elements.combined.scrollTop = scrollTop;
+      }
+    } finally {
+      isRendering = false;
+
+      // If there's a pending render, execute it now
+      if (pendingRender) {
+        const pending = pendingRender;
+        pendingRender = null;
+        await rendererRendering.render(pending.state, pending.elements);
+      }
+    }
+  },
+
+  // Animate element removal with fade-out (performance optimized)
+  animateRemoval: (element) => {
+    if (!element || !element.parentNode) return;
+
+    // Add class on next frame to ensure CSS transition triggers
+    requestAnimationFrame(() => {
+      element.classList.add('removing');
+    });
+
+    // Listen for actual transition completion
+    const handleTransitionEnd = (e) => {
+      if (e.propertyName !== 'opacity') return; // Only trigger once
+      element.removeEventListener('transitionend', handleTransitionEnd);
+      if (element.parentNode) {
+        element.remove();
+      }
+    };
+
+    element.addEventListener('transitionend', handleTransitionEnd, { once: true });
+
+    // Fallback timeout only if transition fails
+    setTimeout(() => {
+      element.removeEventListener('transitionend', handleTransitionEnd);
+      if (element.parentNode) {
+        element.remove();
+      }
+    }, 300);
   },
 
   // Selective DOM update functions
@@ -17,8 +77,8 @@ const rendererRendering = {
       const newElement = rendererRendering.renderBookmarkItem(bookmark, state);
       existingElement.replaceWith(newElement);
     } else if (!bookmark && existingElement) {
-      // Remove deleted item
-      existingElement.remove();
+      // Remove deleted item with animation
+      rendererRendering.animateRemoval(existingElement);
     } else if (bookmark && !existingElement) {
       // Add new item (need to find correct insertion point)
       rendererRendering.insertBookmarkAtCorrectPosition(bookmark, state, elements);
@@ -31,7 +91,7 @@ const rendererRendering = {
       const newElement = rendererRendering.renderTabItem(tab, state);
       existingElement.replaceWith(newElement);
     } else if (!tab && existingElement) {
-      existingElement.remove();
+      rendererRendering.animateRemoval(existingElement);
     } else if (tab && !existingElement) {
       rendererRendering.insertTabAtCorrectPosition(tab, state, elements);
     }
@@ -117,10 +177,295 @@ const rendererRendering = {
     return parentFolder.querySelector('.bm-children');
   },
 
+  // Dated Items Rendering
+  renderDatedItemsSection: async (state, elements) => {
+    if (!window.datedLinksModule) return;
+
+    try {
+      const datedItems = await window.datedLinksModule.getSortedByDate();
+
+      if (!datedItems || datedItems.length === 0) return;
+
+      // Filter by search query if present
+      let filteredItems = datedItems;
+      if (state.query && state.query.trim()) {
+        const query = state.query.toLowerCase();
+        filteredItems = datedItems.filter(item => {
+          const hay = ((item.title || '') + ' ' + (item.url || '')).toLowerCase();
+          return hay.includes(query);
+        });
+      }
+
+      if (filteredItems.length === 0) return;
+
+      // Separate today/past items from future items
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const todayAndPastItems = [];
+      const futureItems = [];
+
+      filteredItems.forEach(item => {
+        const itemDate = new Date(item.date);
+        itemDate.setHours(0, 0, 0, 0);
+
+        if (itemDate.getTime() <= today.getTime()) {
+          todayAndPastItems.push(item);
+        } else {
+          futureItems.push(item);
+        }
+      });
+
+      // Only show section if there are items to display
+      if (todayAndPastItems.length === 0 && futureItems.length === 0) return;
+
+      // Create header
+      const header = document.createElement('div');
+      header.className = 'prd-stv-window-separator';
+      header.innerHTML = `
+        <span class="material-icons-round" style="font-size: 12px; margin-right: 6px;">event</span>
+        <span>Dated Items</span>
+      `;
+      elements.combined.appendChild(header);
+
+      // Render today and past items
+      todayAndPastItems.forEach(item => {
+        const element = rendererRendering.renderDatedItem(item, state);
+        elements.combined.appendChild(element);
+      });
+
+      // Render future items in collapsible section if they exist
+      if (futureItems.length > 0) {
+        rendererRendering.renderFutureDatedItemsCollapsible(futureItems, state, elements);
+      }
+    } catch (error) {
+      console.error('[Renderer] Failed to render dated items:', error);
+    }
+  },
+
+  // Render future dated items in a collapsible section
+  renderFutureDatedItemsCollapsible: (futureItems, state, elements) => {
+    // Initialize collapsed state if not exists
+    if (typeof state.futureDatedItemsCollapsed === 'undefined') {
+      state.futureDatedItemsCollapsed = true; // Start collapsed by default
+    }
+
+    const containerId = 'future-dated-items-container';
+    const isCollapsed = state.futureDatedItemsCollapsed;
+
+    // Create collapsible header with DOM-only toggle
+    const collapsibleHeader = h('div', {
+      class: 'future-dated-items-header',
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        padding: '8px 12px',
+        cursor: 'pointer',
+        fontSize: '11px',
+        color: '#888',
+        fontWeight: '500',
+        userSelect: 'none',
+        borderRadius: '4px',
+        margin: '4px 0',
+        transition: 'background 0.2s'
+      },
+      onclick: (e) => {
+        // Toggle state
+        state.futureDatedItemsCollapsed = !state.futureDatedItemsCollapsed;
+
+        // Find container and chevron
+        const container = document.getElementById(containerId);
+        const chevron = e.currentTarget.querySelector('.future-items-chevron');
+
+        // Toggle visibility via CSS (no re-render!)
+        if (container) {
+          container.classList.toggle('collapsed');
+        }
+
+        // Rotate chevron
+        if (chevron) {
+          const isNowCollapsed = state.futureDatedItemsCollapsed;
+          chevron.style.transform = isNowCollapsed ? 'rotate(0deg)' : 'rotate(90deg)';
+        }
+      },
+      onmouseenter: (e) => {
+        e.target.style.background = 'rgba(255, 255, 255, 0.05)';
+      },
+      onmouseleave: (e) => {
+        e.target.style.background = 'transparent';
+      }
+    }, [
+      h('span', {
+        class: 'material-icons-round future-items-chevron',
+        style: {
+          fontSize: '16px',
+          marginRight: '6px',
+          transition: 'transform 0.2s',
+          transform: isCollapsed ? 'rotate(0deg)' : 'rotate(90deg)'
+        }
+      }, 'chevron_right'),
+      h('span', {}, `Future items (${futureItems.length})`)
+    ]);
+
+    elements.combined.appendChild(collapsibleHeader);
+
+    // Create container for future items (always rendered, visibility controlled by CSS)
+    const container = h('div', {
+      id: containerId,
+      class: isCollapsed ? 'future-dated-items-list collapsed' : 'future-dated-items-list'
+    });
+
+    // Render all items into container
+    futureItems.forEach(item => {
+      const element = rendererRendering.renderDatedItem(item, state);
+      container.appendChild(element);
+    });
+
+    elements.combined.appendChild(container);
+  },
+
+  renderDatedItem: (item, state) => {
+    const isOverdue = window.datedLinksModule.isOverdue(item.date);
+    const isFolder = item.itemType === 'folder' || item.url.startsWith('folder://bookmark/');
+
+    // Check if this dated item has an associated open tab
+    const relatedTabId = item.itemId ? state.bookmarkTabRelationships[item.itemId] : null;
+    const hasOpenTab = !!relatedTabId;
+    const relatedTab = hasOpenTab ? state.itemMaps.tabs.get(relatedTabId) : null;
+    const isRelatedTabActive = !!(relatedTab && relatedTab.active);
+
+    // Build class name
+    const classNames = ['prd-stv-cmd-item', 'dated-item'];
+    if (isOverdue) classNames.push('dated-item-overdue');
+    if (hasOpenTab) classNames.push('bookmark-highlighted');
+    if (isRelatedTabActive) classNames.push('active-tab');
+
+    const formattedDate = window.datedLinksModule.formatDate(item.date);
+    const dateClass = isOverdue ? 'dated-item-date overdue' : 'dated-item-date';
+
+    // Button icon and title based on whether tab is open
+    const buttonIcon = hasOpenTab ? 'remove' : 'check';
+    const buttonTitle = hasOpenTab ? 'Close tab' : 'Remove date';
+    const actionClass = hasOpenTab ? 'close-tab-btn' : 'remove-date-btn';
+
+    // Create icon element
+    const iconEl = isFolder
+      ? h('span', {
+          class: 'material-icons-round prd-stv-folder-icon',
+          style: { fontSize: '18px', marginRight: '8px', color: '#b9a079' }
+        }, 'folder')
+      : h('img', {
+          class: 'prd-stv-favicon',
+          src: window.utils.getFavicon({ type: window.CONSTANTS.ITEM_TYPES.BOOKMARK, url: item.url }),
+          onerror: (e) => { e.target.src = window.CONSTANTS.ICONS.FALLBACK; }
+        });
+
+    // Create title element (using innerHTML for highlightMatches which returns HTML string)
+    const titleEl = h('span', { class: 'prd-stv-title' });
+    titleEl.innerHTML = window.utils.highlightMatches(item.title || item.url, state.query || '');
+
+    // Build the element using h()
+    const div = h('div', {
+      class: classNames.join(' '),
+      'data-id': item.id,
+      'data-url': item.url,
+      'data-itemType': 'dated',
+      draggable: 'true',
+      title: `${item.title}\n${isFolder ? 'Folder' : item.url}\nDate: ${item.date}`
+    }, [
+      h('div', { style: { display: 'flex', flex: '1', alignItems: 'center', minWidth: '0' } }, [
+        iconEl,
+        titleEl,
+        h('span', {
+          class: dateClass,
+          'data-action': 'update-date',
+          title: 'Click to update date',
+          style: { cursor: 'pointer' }
+        }, formattedDate)
+      ]),
+      h('div', { class: 'prd-stv-item-controls' }, [
+        h('button', { class: 'prd-stv-menu-btn', title: 'More options' }, '\u2026'),
+        h('button', { class: `prd-stv-close-btn ${actionClass}`, title: buttonTitle }, [
+          h('span', { class: 'material-icons-round' }, buttonIcon)
+        ])
+      ])
+    ]);
+
+    // Event handler
+    div.addEventListener('click', async (e) => {
+      if (e.target.classList.contains('prd-stv-close-btn') || e.target.closest('.prd-stv-close-btn')) {
+        e.stopPropagation();
+        if (hasOpenTab) {
+          window.closeTabFromBookmark(item.itemId);
+        } else {
+          await window.datedLinksModule.removeDate(item.url);
+          window.utils.showToast('Date removed');
+          await window.renderer.render(window.state, window.elements);
+        }
+      } else if (e.target.dataset.action === 'update-date' || e.target.closest('[data-action="update-date"]')) {
+        e.stopPropagation();
+        const itemData = {
+          url: item.url,
+          title: item.title,
+          favicon: item.favicon,
+          itemType: item.itemType,
+          itemId: item.itemId
+        };
+        window.dateModal.show(itemData);
+      } else if (e.target.classList.contains('prd-stv-menu-btn')) {
+        e.stopPropagation();
+        if (isFolder) {
+          const fakeFolder = { id: item.itemId, title: item.title, _isDated: true };
+          window.rendererUIActions.showFolderContextMenu(e, fakeFolder);
+        } else {
+          const fakeBookmark = { id: item.itemId, title: item.title, url: item.url, _isDated: true };
+          window.rendererUIActions.showContextMenu(e, fakeBookmark, div);
+        }
+      } else {
+        if (isFolder) {
+          const folderId = item.itemId;
+          if (folderId) {
+            // Expand the folder and scroll to it
+            await window.folderState.ensureExpanded(folderId, state, window.storage);
+            await window.renderer.render(state, window.elements);
+            // Find the folder element and scroll to it within the list container
+            const folderEl = document.querySelector(`.bm-folder[data-id="${folderId}"]`);
+            const listContainer = document.querySelector('.prd-stv-list');
+            if (folderEl && listContainer) {
+              // Calculate scroll position within the container
+              const containerRect = listContainer.getBoundingClientRect();
+              const folderRect = folderEl.getBoundingClientRect();
+              const scrollOffset = folderRect.top - containerRect.top + listContainer.scrollTop;
+              // Scroll to position with some padding from the top
+              const paddingTop = 16;
+              listContainer.scrollTo({
+                top: Math.max(0, scrollOffset - paddingTop),
+                behavior: 'smooth'
+              });
+              // Brief highlight effect
+              folderEl.classList.add('scroll-highlight');
+              setTimeout(() => folderEl.classList.remove('scroll-highlight'), 1500);
+            }
+          }
+        } else {
+          window.openUrl(item.url, e, item.itemId);
+        }
+      }
+    });
+
+    // Add drag and drop handlers
+    rendererRendering.addDatedItemDragHandlers(div, item, state);
+
+    return div;
+  },
+
   renderCombined: async (state, elements) => {
     elements.combined.innerHTML = '';
 
-    // Render bookmarks first
+    // Render dated items first (at the top)
+    await rendererRendering.renderDatedItemsSection(state, elements);
+
+    // Render bookmarks
     let roots;
     if (state.filteredTree.length || state.query) {
       roots = state.filteredTree;
@@ -452,6 +797,7 @@ const rendererRendering = {
     const query = state.query;
     const buttonText = hasOpenTab ? 'remove' : 'check';
     const buttonTitle = hasOpenTab ? 'Close tab' : 'Delete bookmark';
+    const actionClass = hasOpenTab ? 'close-tab-btn' : 'delete-bookmark-btn';
 
     div.innerHTML = `
       <div style="display:flex;flex:1;align-items:center;min-width:0;">
@@ -460,7 +806,7 @@ const rendererRendering = {
       </div>
       <div class="prd-stv-item-controls">
         <button class="prd-stv-menu-btn" title="More options" data-bookmark-id="${node.id}">⋯</button>
-        <button class="prd-stv-close-btn ${hasOpenTab ? 'close-tab-btn' : ''}" title="${buttonTitle}">
+        <button class="prd-stv-close-btn ${actionClass}" title="${buttonTitle}">
           <span class="material-icons-round">${buttonText}</span>
         </button>
       </div>
@@ -620,6 +966,31 @@ const rendererRendering = {
       state.dragState.isDragging = true;
       state.dragState.draggedItem = payload;
       state.dragState.draggedType = 'bookmark';
+    });
+
+    div.addEventListener('dragend', () => {
+      state.dragState.isDragging = false;
+      state.dragState.draggedItem = null;
+      state.dragState.draggedType = null;
+    });
+  },
+
+  addDatedItemDragHandlers: (div, item, state) => {
+    div.addEventListener('dragstart', (e) => {
+      const payload = {
+        type: 'dated',
+        id: item.id,
+        url: item.url,
+        title: item.title,
+        itemType: item.itemType,
+        itemId: item.itemId,
+        date: item.date
+      };
+      e.dataTransfer.setData('text/plain', JSON.stringify(payload));
+      e.dataTransfer.effectAllowed = 'copy';
+      state.dragState.isDragging = true;
+      state.dragState.draggedItem = payload;
+      state.dragState.draggedType = 'dated';
     });
 
     div.addEventListener('dragend', () => {

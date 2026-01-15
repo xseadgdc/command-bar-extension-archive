@@ -1,36 +1,190 @@
 // UI Actions module for context menus, modals, and rename operations
 
 const rendererUIActions = {
+  // Quick date calculation helpers
+  getQuickDates() {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    // Tomorrow
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    // Next week (same weekday)
+    const nextWeek = new Date(today);
+    nextWeek.setDate(nextWeek.getDate() + 7);
+
+    // Someday (random date within next 30 days)
+    const someday = new Date(today);
+    const randomDays = Math.floor(Math.random() * 30) + 1;
+    someday.setDate(someday.getDate() + randomDays);
+
+    const formatDate = (date) => {
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    };
+
+    return {
+      tomorrow: formatDate(tomorrow),
+      nextWeek: formatDate(nextWeek),
+      someday: formatDate(someday)
+    };
+  },
+
+  // Create date icon row for context menus (4 icons: tomorrow, next week, someday, custom)
+  createDateIconRow(hasDate, handleDateAction) {
+    // SVG icons for date options
+    const icons = {
+      // Tomorrow: sun rising icon
+      tomorrow: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2v2M12 18v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M18 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+        <circle cx="12" cy="12" r="4"/>
+      </svg>`,
+      // Next week: calendar with arrow
+      nextWeek: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+        <line x1="16" y1="2" x2="16" y2="6"/>
+        <line x1="8" y1="2" x2="8" y2="6"/>
+        <line x1="3" y1="10" x2="21" y2="10"/>
+        <path d="M12 14l3 3-3 3"/>
+      </svg>`,
+      // Someday: question mark calendar
+      someday: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+        <line x1="16" y1="2" x2="16" y2="6"/>
+        <line x1="8" y1="2" x2="8" y2="6"/>
+        <line x1="3" y1="10" x2="21" y2="10"/>
+        <path d="M12 14c.5-1 1.5-1.5 2-1.5.8 0 1.5.7 1.5 1.5 0 1.5-2 2-2 3"/>
+        <circle cx="12" cy="19" r="0.5" fill="currentColor"/>
+      </svg>`,
+      // Custom: calendar with pencil
+      custom: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+        <line x1="16" y1="2" x2="16" y2="6"/>
+        <line x1="8" y1="2" x2="8" y2="6"/>
+        <line x1="3" y1="10" x2="21" y2="10"/>
+        <path d="M15 14l2 2-4 4h-2v-2l4-4z"/>
+      </svg>`,
+      // Remove: X icon
+      remove: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="18" y1="6" x2="6" y2="18"/>
+        <line x1="6" y1="6" x2="18" y2="18"/>
+      </svg>`
+    };
+
+    const createIconButton = (action, icon, title) => {
+      const btn = h('button', {
+        class: 'prd-stv-date-icon-btn',
+        'data-action': action,
+        title: title
+      });
+      btn.innerHTML = icon;
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await handleDateAction(action);
+        rendererUIActions.closeContextMenu();
+      });
+      return btn;
+    };
+
+    const dateOptionsRow = h('div', { class: 'prd-stv-date-icon-row' }, [
+      createIconButton('add-date-tomorrow', icons.tomorrow, 'Tomorrow'),
+      createIconButton('add-date-next-week', icons.nextWeek, 'Next week'),
+      createIconButton('add-date-someday', icons.someday, 'Someday'),
+      createIconButton('add-date-custom', icons.custom, 'Custom date')
+    ]);
+
+    if (!hasDate) return dateOptionsRow;
+
+    // When a date already exists, keep the same quick options for editing and show remove on a new line.
+    const removeRow = h('div', { class: 'prd-stv-date-icon-row' }, [
+      createIconButton('remove-date', icons.remove, 'Remove date')
+    ]);
+
+    return h('div', { class: 'prd-stv-date-icon-section' }, [dateOptionsRow, removeRow]);
+  },
   // Context menu management
-  showContextMenu: (event, bookmark, itemElement) => {
+  showContextMenu: async (event, bookmark, itemElement) => {
     rendererUIActions.closeContextMenu();
 
-    const contextMenu = document.createElement('div');
-    contextMenu.className = 'prd-stv-context-menu';
-    contextMenu.innerHTML = `
-      <div class="prd-stv-context-item" data-action="rename">
-        <span>Rename</span>
-      </div>
-      <div class="prd-stv-context-item" data-action="move">
-        <span>Move to...</span>
-      </div>
-    `;
+    // Check if bookmark has a date
+    let hasDate = false;
+    try {
+      if (window.datedLinksModule) {
+        hasDate = await window.datedLinksModule.hasDate(bookmark.url);
+      }
+    } catch (error) {
+      console.warn('Failed to check dated status:', error);
+    }
 
     const buttonRect = event.target.getBoundingClientRect();
-    contextMenu.style.position = 'fixed';
-    contextMenu.style.left = `${buttonRect.left - 120}px`;
-    contextMenu.style.top = `${buttonRect.bottom + 4}px`;
-    contextMenu.style.zIndex = '10000';
+
+    const handleDateAction = async (action) => {
+      const itemData = {
+        url: bookmark.url,
+        title: bookmark.title || 'Untitled',
+        favicon: bookmark.favicon || '',
+        itemType: 'bookmark',
+        itemId: bookmark.id
+      };
+
+      if (action === 'add-date-tomorrow') {
+        const dates = rendererUIActions.getQuickDates();
+        await window.datedLinksModule.addDate(itemData, dates.tomorrow);
+        window.utils.showToast('Date set to tomorrow');
+      } else if (action === 'add-date-next-week') {
+        const dates = rendererUIActions.getQuickDates();
+        await window.datedLinksModule.addDate(itemData, dates.nextWeek);
+        window.utils.showToast('Date set to next week');
+      } else if (action === 'add-date-someday') {
+        const dates = rendererUIActions.getQuickDates();
+        await window.datedLinksModule.addDate(itemData, dates.someday);
+        window.utils.showToast('Date set to someday');
+      } else if (action === 'add-date-custom') {
+        window.dateModal.show(itemData);
+        return; // Don't close menu yet, modal will handle it
+      } else if (action === 'remove-date') {
+        await window.datedLinksModule.removeDate(bookmark.url);
+        window.utils.showToast('Date removed');
+      }
+
+      if (window.state && window.elements) {
+        await window.renderer.render(window.state, window.elements);
+      }
+    };
+
+    // Create date icon row
+    const dateIconRow = rendererUIActions.createDateIconRow(hasDate, handleDateAction);
+
+    const contextMenu = h('div', {
+      class: 'prd-stv-context-menu',
+      style: {
+        position: 'fixed',
+        left: `${buttonRect.left - 120}px`,
+        top: `${buttonRect.bottom + 4}px`,
+        zIndex: '10000'
+      }
+    }, [
+      dateIconRow,
+      h('div', { class: 'prd-stv-context-item', 'data-action': 'rename' },
+        h('span', {}, 'Rename')),
+      h('div', { class: 'prd-stv-context-item', 'data-action': 'move' },
+        h('span', {}, 'Move to...'))
+    ]);
 
     document.body.appendChild(contextMenu);
 
-    contextMenu.addEventListener('click', (e) => {
+    contextMenu.addEventListener('click', async (e) => {
       const action = e.target.closest('.prd-stv-context-item')?.dataset.action;
+
       if (action === 'rename') {
         rendererUIActions.startRename(bookmark, itemElement);
       } else if (action === 'move') {
         rendererUIActions.showMoveDialog(bookmark);
       }
+
       rendererUIActions.closeContextMenu();
     });
 
@@ -40,51 +194,99 @@ const rendererUIActions = {
   },
 
   closeContextMenu: () => {
-    const existingMenu = document.querySelector('.prd-stv-context-menu');
-    if (existingMenu) {
-      existingMenu.remove();
-    }
+    const existingMenus = document.querySelectorAll('.prd-stv-context-menu');
+    existingMenus.forEach(menu => menu.remove());
   },
 
-  showFolderContextMenu: (event, folder) => {
+  showFolderContextMenu: async (event, folder) => {
     rendererUIActions.closeContextMenu();
 
-    const contextMenu = document.createElement('div');
-    contextMenu.className = 'prd-stv-context-menu';
-
-    const openCount = window.getOpenBookmarkCountInFolder(folder.id, window.state);
-    const closeTabsItem = openCount > 0 ?
-      '<div class="prd-stv-context-item" data-action="close-tabs"><span>Close tabs</span></div>' : '';
-
-    contextMenu.innerHTML = `
-      <div class="prd-stv-context-item" data-action="save-tab-here">
-        <span>Save tab here</span>
-      </div>
-      ${closeTabsItem}
-      <div class="prd-stv-context-item" data-action="new-folder">
-        <span>New folder...</span>
-      </div>
-      <div class="prd-stv-context-item" data-action="rename">
-        <span>Rename</span>
-      </div>
-      <div class="prd-stv-context-item" data-action="move">
-        <span>Move to...</span>
-      </div>
-      <div class="prd-stv-context-item" data-action="delete-folder" style="color: #ff6b6b;">
-        <span>Delete folder</span>
-      </div>
-    `;
+    // Check if folder has a date (use synthetic URL for folders)
+    let hasDate = false;
+    const folderUrl = `folder://bookmark/${folder.id}`;
+    try {
+      if (window.datedLinksModule) {
+        hasDate = await window.datedLinksModule.hasDate(folderUrl);
+      }
+    } catch (error) {
+      console.warn('Failed to check dated status:', error);
+    }
 
     const buttonRect = event.target.getBoundingClientRect();
-    contextMenu.style.position = 'fixed';
-    contextMenu.style.left = `${buttonRect.left - 120}px`;
-    contextMenu.style.top = `${buttonRect.bottom + 4}px`;
-    contextMenu.style.zIndex = '10000';
+
+    const handleDateAction = async (action) => {
+      const itemData = {
+        url: folderUrl,
+        title: folder.title || 'Untitled Folder',
+        favicon: '',
+        itemType: 'folder',
+        itemId: folder.id
+      };
+
+      if (action === 'add-date-tomorrow') {
+        const dates = rendererUIActions.getQuickDates();
+        await window.datedLinksModule.addDate(itemData, dates.tomorrow);
+        window.utils.showToast('Date set to tomorrow');
+      } else if (action === 'add-date-next-week') {
+        const dates = rendererUIActions.getQuickDates();
+        await window.datedLinksModule.addDate(itemData, dates.nextWeek);
+        window.utils.showToast('Date set to next week');
+      } else if (action === 'add-date-someday') {
+        const dates = rendererUIActions.getQuickDates();
+        await window.datedLinksModule.addDate(itemData, dates.someday);
+        window.utils.showToast('Date set to someday');
+      } else if (action === 'add-date-custom') {
+        window.dateModal.show(itemData);
+        return; // Don't close menu yet, modal will handle it
+      } else if (action === 'remove-date') {
+        await window.datedLinksModule.removeDate(folderUrl);
+        window.utils.showToast('Date removed');
+      }
+
+      if (window.state && window.elements) {
+        await window.renderer.render(window.state, window.elements);
+      }
+    };
+
+    // Create date icon row
+    const dateIconRow = rendererUIActions.createDateIconRow(hasDate, handleDateAction);
+
+    const openCount = window.getOpenBookmarkCountInFolder(folder.id, window.state);
+    const closeTabsEl = openCount > 0 ?
+      h('div', { class: 'prd-stv-context-item', 'data-action': 'close-tabs' },
+        h('span', {}, 'Close tabs')) : null;
+
+    const contextMenu = h('div', {
+      class: 'prd-stv-context-menu',
+      style: {
+        position: 'fixed',
+        left: `${buttonRect.left - 120}px`,
+        top: `${buttonRect.bottom + 4}px`,
+        zIndex: '10000'
+      }
+    }, [
+      dateIconRow,
+      h('div', { class: 'prd-stv-context-item', 'data-action': 'save-tab-here' },
+        h('span', {}, 'Save tab here')),
+      closeTabsEl,
+      h('div', { class: 'prd-stv-context-item', 'data-action': 'new-folder' },
+        h('span', {}, 'New folder...')),
+      h('div', { class: 'prd-stv-context-item', 'data-action': 'rename' },
+        h('span', {}, 'Rename')),
+      h('div', { class: 'prd-stv-context-item', 'data-action': 'move' },
+        h('span', {}, 'Move to...')),
+      h('div', {
+        class: 'prd-stv-context-item',
+        'data-action': 'delete-folder',
+        style: { color: '#ff6b6b' }
+      }, h('span', {}, 'Delete folder'))
+    ]);
 
     document.body.appendChild(contextMenu);
 
-    contextMenu.addEventListener('click', (e) => {
+    contextMenu.addEventListener('click', async (e) => {
       const action = e.target.closest('.prd-stv-context-item')?.dataset.action;
+
       if (action === 'save-tab-here') {
         window.saveActiveTabToFolder(folder.id);
       } else if (action === 'close-tabs') {
@@ -98,6 +300,7 @@ const rendererUIActions = {
       } else if (action === 'delete-folder') {
         rendererUIActions.showDeleteFolderModal(folder);
       }
+
       rendererUIActions.closeContextMenu();
     });
 
@@ -106,31 +309,141 @@ const rendererUIActions = {
     }, 10);
   },
 
-  showTabContextMenu: (event, tab, itemElement) => {
+  showTabContextMenu: async (event, tab, itemElement) => {
     rendererUIActions.closeContextMenu();
 
-    const contextMenu = document.createElement('div');
-    contextMenu.className = 'prd-stv-context-menu';
-    contextMenu.innerHTML = `
-      <div class="prd-stv-context-item" data-action="move-to-folder">
-        <span>Move to...</span>
-      </div>
-      <div class="prd-stv-context-item" data-action="duplicate">
-        <span>Duplicate Tab</span>
-      </div>
-    `;
+    // Check if tab is already pinned using the pinned tabs module
+    let isPinned = false;
+    try {
+      if (window.pinnedTabsModule && window.pinnedTabsModule.isUrlPinned) {
+        isPinned = await window.pinnedTabsModule.isUrlPinned(tab.url);
+      }
+    } catch (error) {
+      console.warn('Failed to check pinned status:', error);
+    }
+
+    // Check if tab has a date
+    let hasDate = false;
+    try {
+      if (window.datedLinksModule) {
+        hasDate = await window.datedLinksModule.hasDate(tab.url);
+      }
+    } catch (error) {
+      console.warn('Failed to check dated status:', error);
+    }
 
     const buttonRect = event.target.getBoundingClientRect();
-    contextMenu.style.position = 'fixed';
-    contextMenu.style.left = `${buttonRect.left - 120}px`;
-    contextMenu.style.top = `${buttonRect.bottom + 4}px`;
-    contextMenu.style.zIndex = '10000';
+
+    const handleDateAction = async (action) => {
+      const itemData = {
+        url: tab.url,
+        title: tab.title || 'Untitled',
+        favicon: tab.favIconUrl || '',
+        itemType: 'tab',
+        itemId: tab.id
+      };
+
+      if (action === 'add-date-tomorrow') {
+        const dates = rendererUIActions.getQuickDates();
+        await window.datedLinksModule.addDate(itemData, dates.tomorrow);
+        window.utils.showToast('Date set to tomorrow');
+      } else if (action === 'add-date-next-week') {
+        const dates = rendererUIActions.getQuickDates();
+        await window.datedLinksModule.addDate(itemData, dates.nextWeek);
+        window.utils.showToast('Date set to next week');
+      } else if (action === 'add-date-someday') {
+        const dates = rendererUIActions.getQuickDates();
+        await window.datedLinksModule.addDate(itemData, dates.someday);
+        window.utils.showToast('Date set to someday');
+      } else if (action === 'add-date-custom') {
+        window.dateModal.show(itemData);
+        return; // Don't close menu yet, modal will handle it
+      } else if (action === 'remove-date') {
+        await window.datedLinksModule.removeDate(tab.url);
+        window.utils.showToast('Date removed');
+      }
+
+      if (window.state && window.elements) {
+        await window.renderer.render(window.state, window.elements);
+      }
+    };
+
+    // Create date icon row
+    const dateIconRow = rendererUIActions.createDateIconRow(hasDate, handleDateAction);
+
+    const contextMenu = h('div', {
+      class: 'prd-stv-context-menu',
+      style: {
+        position: 'fixed',
+        left: `${buttonRect.left - 120}px`,
+        top: `${buttonRect.bottom + 4}px`,
+        zIndex: '10000'
+      }
+    }, [
+      dateIconRow,
+      h('div', { class: 'prd-stv-context-item', 'data-action': 'rename' },
+        h('span', {}, 'Rename')),
+      h('div', {
+        class: 'prd-stv-context-item',
+        'data-action': isPinned ? 'unpin' : 'pin'
+      }, h('span', {}, isPinned ? 'Unpin Tab' : 'Pin Tab')),
+      h('div', { class: 'prd-stv-context-item', 'data-action': 'move-to-folder' },
+        h('span', {}, 'Move to...')),
+      h('div', { class: 'prd-stv-context-item', 'data-action': 'duplicate' },
+        h('span', {}, 'Duplicate Tab'))
+    ]);
 
     document.body.appendChild(contextMenu);
 
-    contextMenu.addEventListener('click', (e) => {
+    contextMenu.addEventListener('click', async (e) => {
       const action = e.target.closest('.prd-stv-context-item')?.dataset.action;
-      if (action === 'move-to-folder') {
+
+      if (action === 'rename') {
+        rendererUIActions.startTabRename(tab, itemElement);
+      } else if (action === 'pin') {
+        try {
+          const tabData = {
+            url: tab.url,
+            title: tab.title || 'Untitled',
+            favicon: tab.favIconUrl || ''
+          };
+          const response = await chrome.runtime.sendMessage({
+            type: 'ADD_PINNED_TAB',
+            tabData
+          });
+          if (response && response.success) {
+            window.utils.showToast('Tab pinned');
+            // Trigger a render update to show pinned status
+            if (window.state && window.elements) {
+              await window.renderer.render(window.state, window.elements);
+            }
+          } else {
+            throw new Error(response?.error || 'Failed to pin tab');
+          }
+        } catch (error) {
+          console.error('Failed to pin tab:', error);
+          window.utils.showToast(error.message || 'Failed to pin tab');
+        }
+      } else if (action === 'unpin') {
+        try {
+          const response = await chrome.runtime.sendMessage({
+            type: 'REMOVE_PINNED_TAB',
+            url: tab.url
+          });
+          if (response && response.success) {
+            window.utils.showToast('Tab unpinned');
+            // Trigger a render update to show unpinned status
+            if (window.state && window.elements) {
+              await window.renderer.render(window.state, window.elements);
+            }
+          } else {
+            throw new Error(response?.error || 'Failed to unpin tab');
+          }
+        } catch (error) {
+          console.error('Failed to unpin tab:', error);
+          window.utils.showToast(error.message || 'Failed to unpin tab');
+        }
+      } else if (action === 'move-to-folder') {
         const fakeBookmark = {
           id: `tab_${tab.id}`,
           title: tab.title || 'Untitled',
@@ -142,6 +455,7 @@ const rendererUIActions = {
       } else if (action === 'duplicate') {
         window.duplicateTab(tab);
       }
+
       rendererUIActions.closeContextMenu();
     });
 
@@ -153,22 +467,21 @@ const rendererUIActions = {
   showHistoryContextMenu: (event, historyItem, itemElement) => {
     rendererUIActions.closeContextMenu();
 
-    const contextMenu = document.createElement('div');
-    contextMenu.className = 'prd-stv-context-menu';
-    contextMenu.innerHTML = `
-      <div class="prd-stv-context-item" data-action="open-new-tab">
-        <span>Open in New Tab</span>
-      </div>
-      <div class="prd-stv-context-item" data-action="remove-from-history">
-        <span>Remove from History</span>
-      </div>
-    `;
-
     const buttonRect = event.target.getBoundingClientRect();
-    contextMenu.style.position = 'fixed';
-    contextMenu.style.left = `${buttonRect.left - 120}px`;
-    contextMenu.style.top = `${buttonRect.bottom + 4}px`;
-    contextMenu.style.zIndex = '10000';
+    const contextMenu = h('div', {
+      class: 'prd-stv-context-menu',
+      style: {
+        position: 'fixed',
+        left: `${buttonRect.left - 120}px`,
+        top: `${buttonRect.bottom + 4}px`,
+        zIndex: '10000'
+      }
+    }, [
+      h('div', { class: 'prd-stv-context-item', 'data-action': 'open-new-tab' },
+        h('span', {}, 'Open in New Tab')),
+      h('div', { class: 'prd-stv-context-item', 'data-action': 'remove-from-history' },
+        h('span', {}, 'Remove from History'))
+    ]);
 
     document.body.appendChild(contextMenu);
 
@@ -190,13 +503,14 @@ const rendererUIActions = {
   },
 
   // Rename operations
-  startRename: (bookmark, itemElement) => {
+  startRename: async (bookmark, itemElement) => {
     const titleElement = itemElement.querySelector('.prd-stv-title');
-    const currentTitle = bookmark.title;
 
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.value = currentTitle;
+    // Get custom title or fall back to bookmark title
+    const customTitle = await window.renameHelper.getCustomTitle(bookmark.url);
+    const currentTitle = customTitle || bookmark.title;
+
+    const input = window.renameHelper.createRenameInput(currentTitle);
     input.className = 'prd-stv-rename-input';
     input.style.cssText = 'background:#3a3a3a;border:1px solid #b9a079;color:#fff;padding:2px 4px;border-radius:15px;font-size:14px;outline:none;width:100%;';
 
@@ -220,6 +534,27 @@ const rendererUIActions = {
           }
 
           bookmark.title = newTitle;
+
+          // Save custom title to storage (works for both dated and non-dated items)
+          if (bookmark.url) {
+            await window.renameHelper.saveCustomTitle(bookmark.url, newTitle);
+          }
+
+          // If this is a dated item, update the title in datedLinks storage
+          if (bookmark._isDated && bookmark.url && window.datedLinksModule) {
+            const datedItem = await window.datedLinksModule.getByUrl(bookmark.url);
+            if (datedItem) {
+              datedItem.title = newTitle;
+              const allDatedLinks = await window.datedLinksModule.load();
+              const updatedLinks = allDatedLinks.map(item =>
+                window.datedLinksModule.normalizeUrl(item.url) === window.datedLinksModule.normalizeUrl(bookmark.url)
+                  ? { ...item, title: newTitle }
+                  : item
+              );
+              await window.datedLinksModule.save(updatedLinks);
+            }
+          }
+
           window.utils.showToast('Bookmark renamed');
         } catch (error) {
           console.error('Failed to rename bookmark:', error);
@@ -230,29 +565,21 @@ const rendererUIActions = {
       titleElement.innerHTML = window.utils.highlightMatches(bookmark.title || bookmark.url, window.state?.query || '');
     };
 
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        finishRename(true);
-      } else if (e.key === 'Escape') {
-        e.preventDefault();
-        finishRename(false);
-      }
-    });
-
-    input.addEventListener('blur', () => finishRename(true));
+    window.renameHelper.setupKeyboardHandlers(input, finishRename);
   },
 
-  startFolderRename: (folder) => {
+  startFolderRename: async (folder) => {
     const folderHeader = document.querySelector(`.bm-folder-header[data-id="${folder.id}"]`);
     if (!folderHeader) return;
 
     const titleElement = folderHeader.querySelector('span:last-child');
-    const currentTitle = folder.title;
 
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.value = currentTitle;
+    // Get custom title or fall back to folder title (use synthetic URL for folders)
+    const folderUrl = `folder://bookmark/${folder.id}`;
+    const customTitle = await window.renameHelper.getCustomTitle(folderUrl);
+    const currentTitle = customTitle || folder.title;
+
+    const input = window.renameHelper.createRenameInput(currentTitle);
     input.className = 'prd-stv-rename-input';
     input.style.cssText = 'background:#3a3a3a;border:1px solid #b9a079;color:#fff;padding:2px 4px;border-radius:15px;font-size:14px;outline:none;width:100%;';
 
@@ -276,6 +603,25 @@ const rendererUIActions = {
           }
 
           folder.title = newTitle;
+
+          // Save custom title to storage (works for both dated and non-dated folders)
+          await window.renameHelper.saveCustomTitle(folderUrl, newTitle);
+
+          // If this is a dated folder, update the title in datedLinks storage
+          if (folder._isDated && window.datedLinksModule) {
+            const datedItem = await window.datedLinksModule.getByUrl(folderUrl);
+            if (datedItem) {
+              datedItem.title = newTitle;
+              const allDatedLinks = await window.datedLinksModule.load();
+              const updatedLinks = allDatedLinks.map(item =>
+                window.datedLinksModule.normalizeUrl(item.url) === window.datedLinksModule.normalizeUrl(folderUrl)
+                  ? { ...item, title: newTitle }
+                  : item
+              );
+              await window.datedLinksModule.save(updatedLinks);
+            }
+          }
+
           window.utils.showToast('Folder renamed');
         } catch (error) {
           console.error('Failed to rename folder:', error);
@@ -286,17 +632,51 @@ const rendererUIActions = {
       titleElement.textContent = folder.title || 'Untitled folder';
     };
 
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        finishRename(true);
-      } else if (e.key === 'Escape') {
-        e.preventDefault();
-        finishRename(false);
-      }
-    });
+    window.renameHelper.setupKeyboardHandlers(input, finishRename);
+  },
 
-    input.addEventListener('blur', () => finishRename(true));
+  // Rename tab (saves custom title to customTitles storage)
+  startTabRename: async (tab, itemElement) => {
+    const titleElement = itemElement.querySelector('.prd-stv-title');
+
+    // Get custom title or fall back to tab title
+    const customTitle = await window.renameHelper.getCustomTitle(tab.url);
+    const currentTitle = customTitle || tab.title;
+
+    const input = window.renameHelper.createRenameInput(currentTitle);
+    input.style.cssText = 'background:#3a3a3a;border:1px solid #b9a079;color:#fff;padding:2px 4px;border-radius:15px;font-size:14px;outline:none;width:100%;';
+
+    titleElement.textContent = '';
+    titleElement.appendChild(input);
+    input.focus();
+    input.select();
+
+    const finishRename = async (save = false) => {
+      const newTitle = input.value.trim();
+      if (save && newTitle && newTitle !== currentTitle) {
+        try {
+          // Save custom title to storage (tabs don't have a Chrome API for renaming)
+          if (tab.url) {
+            await window.renameHelper.saveCustomTitle(tab.url, newTitle);
+          }
+
+          tab.customTitle = newTitle;
+          window.utils.showToast('Tab renamed');
+
+          // Re-render to show the updated title
+          if (window.state && window.elements) {
+            await window.renderer.render(window.state, window.elements);
+          }
+        } catch (error) {
+          console.error('Failed to rename tab:', error);
+          window.utils.showToast('Failed to rename tab');
+        }
+      }
+
+      titleElement.textContent = tab.customTitle || tab.title || 'Untitled';
+    };
+
+    window.renameHelper.setupKeyboardHandlers(input, finishRename);
   },
 
   // Move dialog
@@ -304,41 +684,121 @@ const rendererUIActions = {
     const existingDialog = document.querySelector('.prd-stv-move-dialog');
     if (existingDialog) existingDialog.remove();
 
-    const overlay = document.createElement('div');
-    overlay.className = 'prd-stv-move-overlay';
-    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:20000;display:flex;align-items:center;justify-content:center;';
-
-    const dialog = document.createElement('div');
-    dialog.className = 'prd-stv-move-dialog';
-    dialog.style.cssText = 'background:#2b2b2b;border-radius:15px;padding:20px;width:400px;max-width:90%;max-height:80%;color:#f5f5f5;';
-
     const isTab = bookmark._isTab;
     const isFolder = !bookmark.url && !bookmark._isTab;
     const actionText = isTab ? 'Save' : 'Move';
     const itemType = isFolder ? 'folder' : (isTab ? 'bookmark' : 'bookmark');
     const titleText = isTab ? `Save as bookmark` : `Move "${bookmark.title}" to ${itemType === 'folder' ? 'parent folder' : 'folder'}`;
 
-    const titleInputHTML = isTab ? `
-      <input type="text" class="prd-stv-title-input" placeholder="Bookmark title"
-        value="${window.utils.escapeHtml(bookmark.title || '')}"
-        style="width:100%;padding:8px;background:#3a3a3a;border:1px solid #555;color:#fff;border-radius:15px;margin-bottom:12px;box-sizing:border-box;font-size:14px;">
-    ` : '';
+    const titleInputEl = isTab ?
+      h('input', {
+        type: 'text',
+        class: 'prd-stv-title-input',
+        placeholder: 'Bookmark title',
+        value: bookmark.title || '',
+        style: {
+          width: '100%',
+          padding: '8px',
+          background: '#3a3a3a',
+          border: '1px solid #555',
+          color: '#fff',
+          borderRadius: '15px',
+          marginBottom: '12px',
+          boxSizing: 'border-box',
+          fontSize: '14px'
+        }
+      }) : null;
 
-    dialog.innerHTML = `
-      <h3 style="margin:0 0 16px 0;font-size:16px;">${titleText}</h3>
-      ${titleInputHTML}
-      <input type="text" class="prd-stv-folder-search" placeholder="Search folders..."
-        style="width:100%;padding:8px;background:#3a3a3a;border:1px solid #555;color:#fff;border-radius:15px;margin-bottom:16px;box-sizing:border-box;">
-      <div class="prd-stv-folder-list" style="max-height:300px;overflow-y:auto;border:1px solid #555;border-radius:15px;">
-        <div style="padding:16px;text-align:center;color:#999;">Loading folders...</div>
-      </div>
-      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
-        <button class="prd-stv-cancel-btn" style="padding:8px 16px;background:#555;color:#fff;border:none;border-radius:15px;cursor:pointer;">Cancel</button>
-        <button class="prd-stv-move-btn" style="padding:8px 16px;background:#b9a079;color:#000;border:none;border-radius:15px;cursor:pointer;" disabled>${actionText}</button>
-      </div>
-    `;
+    const dialog = h('div', {
+      class: 'prd-stv-move-dialog',
+      style: {
+        background: '#2b2b2b',
+        borderRadius: '15px',
+        padding: '20px',
+        width: '400px',
+        maxWidth: '90%',
+        maxHeight: '80%',
+        color: '#f5f5f5'
+      }
+    }, [
+      h('h3', { style: { margin: '0 0 16px 0', fontSize: '16px' } }, titleText),
+      titleInputEl,
+      h('input', {
+        type: 'text',
+        class: 'prd-stv-folder-search',
+        placeholder: 'Search folders...',
+        style: {
+          width: '100%',
+          padding: '8px',
+          background: '#3a3a3a',
+          border: '1px solid #555',
+          color: '#fff',
+          borderRadius: '15px',
+          marginBottom: '16px',
+          boxSizing: 'border-box'
+        }
+      }),
+      h('div', {
+        class: 'prd-stv-folder-list',
+        style: {
+          maxHeight: '300px',
+          overflowY: 'auto',
+          border: '1px solid #555',
+          borderRadius: '15px'
+        }
+      }, h('div', {
+        style: { padding: '16px', textAlign: 'center', color: '#999' }
+      }, 'Loading folders...')),
+      h('div', {
+        style: {
+          display: 'flex',
+          justifyContent: 'flex-end',
+          gap: '8px',
+          marginTop: '16px'
+        }
+      }, [
+        h('button', {
+          class: 'prd-stv-cancel-btn',
+          style: {
+            padding: '8px 16px',
+            background: '#555',
+            color: '#fff',
+            border: 'none',
+            borderRadius: '15px',
+            cursor: 'pointer'
+          }
+        }, 'Cancel'),
+        h('button', {
+          class: 'prd-stv-move-btn',
+          disabled: true,
+          style: {
+            padding: '8px 16px',
+            background: '#b9a079',
+            color: '#000',
+            border: 'none',
+            borderRadius: '15px',
+            cursor: 'pointer'
+          }
+        }, actionText)
+      ])
+    ]);
 
-    overlay.appendChild(dialog);
+    const overlay = h('div', {
+      class: 'prd-stv-move-overlay',
+      style: {
+        position: 'fixed',
+        top: '0',
+        left: '0',
+        width: '100%',
+        height: '100%',
+        background: 'rgba(0,0,0,0.5)',
+        zIndex: '20000',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center'
+      }
+    }, dialog);
+
     document.body.appendChild(overlay);
 
     rendererUIActions.setupMoveDialog(dialog, bookmark, overlay);
@@ -399,7 +859,11 @@ const rendererUIActions = {
     try {
       const response = await chrome.runtime.sendMessage({ type: 'GET_BOOKMARK_TREE' });
 
-      if (response && response.success === false) {
+      if (!response) {
+        throw new Error('No response from background script');
+      }
+
+      if (response.success === false) {
         throw new Error(response.error || 'Failed to get bookmark tree');
       }
 
@@ -408,6 +872,7 @@ const rendererUIActions = {
       filteredFolders = allFolders;
       rendererUIActions.renderFolderList(folderList, filteredFolders, updateSelection);
     } catch (error) {
+      console.error('Failed to load folders:', error);
       folderList.innerHTML = '<div style="padding:16px;text-align:center;color:#ff6666;">Failed to load folders</div>';
     }
 
@@ -535,13 +1000,39 @@ const rendererUIActions = {
   },
 
   renderFolderList: (container, folders, onSelect) => {
-    container.innerHTML = folders.map((folder, index) => `
-      <div class="prd-stv-folder-item" data-folder-id="${folder.id}" data-index="${index}"
-        style="padding:8px 12px;cursor:pointer;border-bottom:1px solid #3a3a3a;display:flex;flex-direction:column;">
-        <div style="font-size:14px;color:#f5f5f5;">${window.utils.escapeHtml(folder.title)}</div>
-        <div style="font-size:12px;color:#999;margin-top:2px;">${window.utils.escapeHtml(folder.path)}</div>
-      </div>
-    `).join('') || '<div style="padding:16px;text-align:center;color:#999;">No folders found</div>';
+    // Clear existing content
+    container.innerHTML = '';
+
+    if (folders.length === 0) {
+      container.appendChild(
+        h('div', {
+          style: { padding: '16px', textAlign: 'center', color: '#999' }
+        }, 'No folders found')
+      );
+    } else {
+      folders.forEach((folder, index) => {
+        const folderItem = h('div', {
+          class: 'prd-stv-folder-item',
+          'data-folder-id': folder.id,
+          'data-index': index,
+          style: {
+            padding: '8px 12px',
+            cursor: 'pointer',
+            borderBottom: '1px solid #3a3a3a',
+            display: 'flex',
+            flexDirection: 'column'
+          }
+        }, [
+          h('div', {
+            style: { fontSize: '14px', color: '#f5f5f5' }
+          }, folder.title),
+          h('div', {
+            style: { fontSize: '12px', color: '#999', marginTop: '2px' }
+          }, folder.path)
+        ]);
+        container.appendChild(folderItem);
+      });
+    }
 
     container.addEventListener('click', (e) => {
       const folderItem = e.target.closest('.prd-stv-folder-item');
